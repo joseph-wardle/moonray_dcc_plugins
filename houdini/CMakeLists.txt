@@ -12,6 +12,7 @@ install(FILES
 )
 
 install(DIRECTORY
+        dso
         otls
         soho
         python2.7libs
