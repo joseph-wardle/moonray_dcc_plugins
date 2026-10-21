@@ -31,6 +31,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 
 import hou
 from pxr import Sdf, Sdr, Usd, UsdLux
@@ -193,6 +194,25 @@ DEPRECATED_PREFIX = "_deprecated_"
 # Documentation URL embedded in each HDA's HelpUrl section. Empty means no
 # HelpUrl section is written; set it with --help-url.
 HELP_URL = os.environ.get('MOONRAY_HDA_HELP_URL', '')
+
+# Puts each VOP in the TAB menu under {submenu}.
+TOOLS_SHELF = """<?xml version="1.0" encoding="UTF-8"?>
+<shelfDocument>
+  <tool name="$HDA_DEFAULT_TOOL" label="$HDA_LABEL" icon="$HDA_ICON">
+    <toolMenuContext name="viewer">
+      <contextNetType>VOP</contextNetType>
+    </toolMenuContext>
+    <toolMenuContext name="network">
+      <contextOpType>$HDA_TABLE_AND_NAME</contextOpType>
+    </toolMenuContext>
+    <toolSubmenu>{submenu}</toolSubmenu>
+    <script scriptType="python"><![CDATA[import voptoolutils
+
+voptoolutils.genericTool(kwargs, '$HDA_NAME')
+]]></script>
+  </tool>
+</shelfDocument>
+"""
 
 MOONRAY_TO_USD_TYPE = {
     "Int": "int",
@@ -1179,7 +1199,7 @@ class MoonrayClass(object):
         }
 
     def set_tab_menu(self, menu='DW Moonray'):
-        return None
+        self.hda.addSection('Tools.shelf', TOOLS_SHELF.format(submenu=menu))
 
     def tag_ramp_parms(self, hda, verbose):
         if self.houdini_context != 'Vop':
@@ -1287,6 +1307,33 @@ class HDABuilder(object):
 
     def cleanup_hda(self):
         self.update_url()
+
+    def make_leaf(self):
+        """Turn the subnet asset into a plain shader node.
+
+        Solaris authors a subnet VOP as a NodeGraph, not a Shader with an
+        info:id, so materials built from it render with the fallback shader.
+        Houdini has no call to clear the subnet flag, so edit it in the
+        asset's expanded form.
+        """
+        for name in ('Contents.gz', 'InternalFileOptions'):
+            if self.hda.hasSection(name):
+                self.hda.removeSection(name)
+        self.hda.setOptions(self.hda.options())  # writes TypePropertiesOptions
+
+        path = self.hda.libraryFilePath()
+        with tempfile.TemporaryDirectory() as tmp:
+            expanded = os.path.join(tmp, 'expanded')
+            hou.hda.expandToDirectory(path, expanded)
+            index = os.path.join(expanded, 'INDEX__SECTION')
+            with open(index) as f:
+                text = f.read()
+            if 'Subnet:       true' not in text:
+                raise ValueError(
+                    "No subnet flag in {0}".format(path))
+            with open(index, 'w') as f:
+                f.write(text.replace('Subnet:       true', 'Subnet:       false'))
+            hou.hda.collapseFromDirectory(path, expanded)
 
     @classmethod
     def create_hda(cls, moonray_class, directory):
@@ -1884,6 +1931,7 @@ class UpdateHDAs(object):
             if not builder.validate_disable_when():
                 moonray_class.add_parms_to_hda(verbose=False)
             builder.cleanup_hda()
+            builder.make_leaf()
 
     def save_node_dict(self):
         for moonray_class in self.moonray_classes:
